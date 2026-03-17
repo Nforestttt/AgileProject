@@ -13,8 +13,8 @@
 
 2026/03/14 | Write batch insert SQL scripts | Completed | Adapted to table structure; section_no uses numeric format; null values are uniformly set to 'null'
 
-2026/03/15 | Organize IELTS Listening answer JSON | Completed | Collated complete answers for Test1~Test4 to support front-end display
-
 2026/03/16 | Create multi-table join view | Completed | Established section_view to associate test paper and section tables for unified query
 
 2026/03/16 | Database structure verification and optimization | Completed | Verified unique constraints, foreign keys, and field lengths to ensure data integrity
+
+2026/03/17 | finish all data input
