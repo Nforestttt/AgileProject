@@ -1,30 +1,62 @@
 # forum.py
-# 纯函数版 - 只包含论坛核心业务逻辑，不依赖任何 web 框架
-# 使用方式：由 Qt 前端或其他 Python 代码调用这些函数，并传入 sqlalchemy 的 session
+# FastAPI 论坛模块
+# 只负责论坛 API，不创建 FastAPI app 和数据库连接
 
-from typing import List, Dict, Optional, Tuple
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
+from sqlalchemy import text
 from datetime import datetime
+from typing import List, Dict, Optional
 
-# 假设的模型（你项目里已有的，不要重复定义，这里只是类型提示用）
-# from models import Post, Reply, PostLike, ReplyLike
+# 数据库依赖从项目其他模块导入
+from database import get_db
+
+router = APIRouter(
+    prefix="/forum",
+    tags=["Forum"]
+)
 
 
-def get_posts(db: Session, page: int = 1, page_size: int = 20) -> Dict:
-    """
-    分页获取所有帖子列表（最新帖在前）
-    返回格式示例：
-    {
-        "total": 168,
-        "page": 1,
-        "page_size": 20,
-        "posts": [
-            {"id": 15, "title": "...", "author": "...", "time": "...", "reply_count": 7, "likes": 12},
-            ...
-        ]
-    }
-    """
+# ==============================
+# 请求数据模型
+# ==============================
+
+class PostCreate(BaseModel):
+    title: str
+    content: str
+    user_id: int
+
+
+class ReplyCreate(BaseModel):
+    content: str
+    user_id: int
+
+
+class LikeAction(BaseModel):
+    user_id: int
+
+
+# ==============================
+# 获取帖子列表
+# ==============================
+"""
+    返回值说明：
+    - total: 总帖子数量
+    - page: 当前页码
+    - page_size: 每页条数
+    - posts: 帖子列表数组
+        - id: 帖子ID
+        - title: 标题
+        - author: 作者昵称
+        - time: 发布日期（YYYY-MM-DD）
+        - reply_count: 回复总数
+        - likes: 点赞数
+"""
+
+@router.get("/posts")
+def get_posts(page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+
     if page < 1:
         page = 1
     if page_size < 1:
@@ -32,247 +64,501 @@ def get_posts(db: Session, page: int = 1, page_size: int = 20) -> Dict:
 
     offset = (page - 1) * page_size
 
-    total = db.query(func.count(Post.id)).scalar() or 0
+    total = db.execute(text("""
+        SELECT COUNT(*)
+        FROM t_forum_post
+        WHERE is_delete = 0
+    """)).scalar() or 0
 
-    posts = (
-        db.query(Post)
-        .order_by(desc(Post.created_at))
-        .offset(offset)
-        .limit(page_size)
-        .all()
-    )
+    rows = db.execute(text("""
+        SELECT p.post_id, p.title, p.create_time, p.reply_count, p.like_count, u.username AS author
+        FROM t_forum_post p
+        INNER JOIN t_user u ON p.user_id = u.user_id
+        WHERE p.is_delete = 0
+        ORDER BY p.create_time DESC
+        LIMIT :offset, :page_size
+    """), {
+        "offset": offset,
+        "page_size": page_size
+    }).fetchall()
 
-    result_posts = []
-    for p in posts:
-        result_posts.append({
-            "id": p.id,
-            "title": p.title,
-            "author": p.username,          # 看user用户表
-            "time": p.created_at.strftime("%Y-%m-%d"),
-            "reply_count": p.reply_count,
-            "likes": p.likes_count
+    posts = []
+
+    for row in rows:
+        posts.append({
+            "id": row.post_id,
+            "title": row.title,
+            "author": row.author,
+            "time": row.create_time.strftime("%Y-%m-%d"),
+            "reply_count": row.reply_count,
+            "likes": row.like_count
         })
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "posts": result_posts
+        "posts": posts
     }
 
 
-def get_post_detail(db: Session, post_id: int) -> Optional[Dict]:
-    """
-    获取单个帖子详细信息
-    返回示例：
-    {"id":1, "title":"项目课", "author":"Alice", "time":"2026-03-10", "content":"大家有什推荐的资源？","likes":3}
-    或 None（不存在）
-    """
-    post = db.query(Post).filter(Post.id == post_id).first()
-    if not post:
+# ==============================
+# 帖子详情
+# ==============================
+"""
+    返回值说明：
+    - 找不到帖子：返回 null
+    - 找到帖子：
+        - id: 帖子ID
+        - title: 标题
+        - author: 作者昵称
+        - time: 发布日期
+        - content: 帖子内容
+        - likes: 点赞数
+"""
+
+@router.get("/posts/{post_id}")
+def get_post_detail(post_id: int, db: Session = Depends(get_db)):
+
+    row = db.execute(text("""
+        SELECT p.post_id, p.title, p.content, p.create_time, p.like_count, u.username AS author
+        FROM t_forum_post p
+        INNER JOIN t_user u ON p.user_id = u.user_id
+        WHERE p.post_id = :post_id AND p.is_delete = 0
+        LIMIT 1
+    """), {"post_id": post_id}).fetchone()
+
+    if not row:
         return None
 
     return {
-        "id": post.id,
-        "title": post.title,
-        "author": post.username,
-        "time": post.created_at.strftime("%Y-%m-%d"),
-        "content": post.content,
-        "likes": post.likes_count
+        "id": row.post_id,
+        "title": row.title,
+        "author": row.author,
+        "time": row.create_time.strftime("%Y-%m-%d"),
+        "content": row.content,
+        "likes": row.like_count
     }
 
 
-def get_replies(db: Session, post_id: int) -> List[Dict]:
-    """
-    获取某个帖子的所有回复
-    返回示例：
-    [
-        {"author":"Bob", "content":"不错", "likes":2},
-        {"author":"Cindy", "content":"我推荐TED", "likes":1}
-    ]
-    """
+# ==============================
+# 获取回复
+# ==============================
+"""
+    返回值说明：
+    - 数组，每个元素代表一条回复
+        - reply_id: 回复ID
+        - author: 回复者昵称
+        - content: 回复内容
+        - likes: 回复点赞数
+        - time: 回复时间（YYYY-MM-DD HH:MM）
+    - 帖子不存在/无回复：返回空数组
+"""
 
-    if not db.query(Post).filter(Post.id == post_id).first():
-         return []
+@router.get("/posts/{post_id}/replies")
+def get_replies(post_id: int, db: Session = Depends(get_db)):
 
-    replies = (
-        db.query(Reply)
-        .filter(Reply.post_id == post_id)
-        .order_by(Reply.created_at)
-        .all()
-    )
+    exists = db.execute(text("""
+        SELECT 1
+        FROM t_forum_post
+        WHERE post_id = :post_id AND is_delete = 0
+        LIMIT 1
+    """), {"post_id": post_id}).fetchone()
+
+    if not exists:
+        return []
+
+    rows = db.execute(text("""
+        SELECT r.reply_id, r.content, r.create_time, r.like_count, u.username AS author
+        FROM t_forum_reply r
+        INNER JOIN t_user u ON r.user_id = u.user_id
+        WHERE r.post_id = :post_id AND r.is_delete = 0
+        ORDER BY r.create_time ASC
+    """), {"post_id": post_id}).fetchall()
 
     result = []
-    for r in replies:
+
+    for row in rows:
         result.append({
-            "author": r.username,
-            "content": r.content,
-            "likes": r.likes_count,
-            "time": r.created_at.strftime("%Y-%m-%d %H:%M")
+            "reply_id": row.reply_id,
+            "author": row.author,
+            "content": row.content,
+            "likes": row.like_count,
+            "time": row.create_time.strftime("%Y-%m-%d %H:%M")
         })
+
     return result
 
 
-def create_post(db: Session, title: str, content: str, user_id: int, username: str = None) -> Dict:
-    """
-    创建帖子
-    返回示例：{"status": "ok", "post_id": 123} 或 {"status": "error", "message": "..."}
-    """
-    if not title or not title.strip():
-        return {"status": "error", "message": "标题不能为空"}
-    if not content or not content.strip():
-        return {"status": "error", "message": "内容不能为空"}
+# ==============================
+# 创建帖子
+# ==============================
+"""
+    返回值说明：
+    - 成功：{"status": "ok", "post_id": 新帖子ID}
+    - 失败：{"status": "error", "message": 错误原因}
+"""
 
-    # 如果前端没传 username，这里可以简单生成或从用户表查
-    if username is None:
-        username = f"user_{user_id}"
+@router.post("/posts")
+def create_post(data: PostCreate, db: Session = Depends(get_db)):
 
-    post = Post(
-        title=title.strip(),
-        content=content.strip(),
-        user_id=user_id,
-        username=username,
-        likes_count=0,
-        reply_count=0,
-        created_at=datetime.now()
-    )
+    if not data.title.strip():
+        return {"status": "error", "message": "The title cannot be empty"}
 
-    db.add(post)
-    db.commit()
-    db.refresh(post)
+    if not data.content.strip():
+        return {"status": "error", "message": "The content cannot be empty"}
 
-    return {"status": "ok", "post_id": post.id}
+    now = datetime.now()
+
+    try:
+
+        result = db.execute(text("""
+            INSERT INTO t_forum_post
+            (user_id, title, content, reply_count, like_count, create_time, update_time, is_delete)
+            VALUES (:user_id, :title, :content, 0, 0, :now, :now, 0)
+        """), {
+            "user_id": data.user_id,
+            "title": data.title.strip(),
+            "content": data.content.strip(),
+            "now": now
+        })
+
+        db.commit()
+
+        return {
+            "status": "ok",
+            "post_id": result.lastrowid
+        }
+
+    except Exception as e:
+
+        db.rollback()
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 
-def reply_post(db: Session, post_id: int, content: str, user_id: int, username: str = None) -> Dict:
-    """
-    回复帖子
-    返回示例：{"status": "ok"} 或 {"status": "error", "message": "..."}
-    """
-    post = db.query(Post).filter(Post.id == post_id).first()
-    if not post:
+# ==============================
+# 回复帖子
+# ==============================
+"""
+    返回值说明：
+    - 成功：{"status": "ok"}
+    - 失败：{"status": "error", "message": 错误原因}
+"""
+
+@router.post("/posts/{post_id}/reply")
+def reply_post(post_id: int, data: ReplyCreate, db: Session = Depends(get_db)):
+
+    post_exists = db.execute(text("""
+        SELECT 1 FROM t_forum_post
+        WHERE post_id = :post_id AND is_delete = 0
+        LIMIT 1
+    """), {"post_id": post_id}).fetchone()
+
+    if not post_exists:
         return {"status": "error", "message": "Post not found"}
 
-    if not content or not content.strip():
+    if not data.content.strip():
         return {"status": "error", "message": "Reply cannot be empty"}
 
-    if username is None:
-        username = f"user_{user_id}"
+    now = datetime.now()
 
-    reply = Reply(
-        post_id=post_id,
-        user_id=user_id,
-        username=username,
-        content=content.strip(),
-        likes_count=0,
-        created_at=datetime.now()
-    )
+    try:
 
-    db.add(reply)
-    post.reply_count += 1
-    db.commit()
+        db.execute(text("""
+            INSERT INTO t_forum_reply
+            (post_id, user_id, content, like_count, create_time, is_delete)
+            VALUES (:post_id, :user_id, :content, 0, :now, 0)
+        """), {
+            "post_id": post_id,
+            "user_id": data.user_id,
+            "content": data.content.strip(),
+            "now": now
+        })
 
-    return {"status": "ok"}
+        db.execute(text("""
+            UPDATE t_forum_post
+            SET reply_count = reply_count + 1,
+                update_time = :now
+            WHERE post_id = :post_id
+        """), {
+            "post_id": post_id,
+            "now": now
+        })
+
+        db.commit()
+
+        return {"status": "ok"}
+
+    except Exception as e:
+
+        db.rollback()
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 
-def like_post(db: Session, post_id: int, user_id: int) -> Dict:
-    """
-    点赞/取消点赞 帖子
-    返回示例：{"status": "ok", "action": "liked"/"unliked", "likes": 5}
-    """
-    post = db.query(Post).filter(Post.id == post_id).first()
-    if not post:
+# ==============================
+# 点赞帖子
+# ==============================
+"""
+    返回值说明：
+    - 成功：
+        status: ok
+        action: liked（点赞）/ unliked（取消点赞）
+        likes: 当前最新点赞总数
+    - 失败：
+        status: error
+        message: 错误原因
+"""
+
+@router.post("/posts/{post_id}/like")
+def like_post(post_id: int, data: LikeAction, db: Session = Depends(get_db)):
+
+    user_id = data.user_id
+    now = datetime.now()
+
+    post_exists = db.execute(text("""
+        SELECT 1 FROM t_forum_post
+        WHERE post_id = :post_id AND is_delete = 0
+        LIMIT 1
+    """), {"post_id": post_id}).fetchone()
+
+    if not post_exists:
         return {"status": "error", "message": "Post not found"}
 
-    like_record = db.query(PostLike).filter(
-        PostLike.post_id == post_id,
-        PostLike.user_id == user_id
-    ).first()
+    like_record = db.execute(text("""
+        SELECT like_id FROM t_forum_post_like
+        WHERE post_id = :post_id AND user_id = :user_id
+        LIMIT 1
+    """), {
+        "post_id": post_id,
+        "user_id": user_id
+    }).fetchone()
 
-    if like_record:
-        # 取消点赞
-        db.delete(like_record)
-        post.likes_count = max(0, post.likes_count - 1)
-        action = "unliked"
-    else:
-        # 点赞
-        db.add(PostLike(post_id=post_id, user_id=user_id))
-        post.likes_count += 1
-        action = "liked"
+    try:
 
-    db.commit()
-    return {"status": "ok", "action": action, "likes": post.likes_count}
+        if like_record:
+
+            db.execute(text("""
+                DELETE FROM t_forum_post_like
+                WHERE post_id = :post_id AND user_id = :user_id
+            """), {
+                "post_id": post_id,
+                "user_id": user_id
+            })
+
+            db.execute(text("""
+                UPDATE t_forum_post
+                SET like_count = GREATEST(like_count - 1, 0),
+                    update_time = :now
+                WHERE post_id = :post_id
+            """), {
+                "post_id": post_id,
+                "now": now
+            })
+
+            action = "unliked"
+
+        else:
+
+            db.execute(text("""
+                INSERT INTO t_forum_post_like (post_id, user_id, create_time)
+                VALUES (:post_id, :user_id, :now)
+            """), {
+                "post_id": post_id,
+                "user_id": user_id,
+                "now": now
+            })
+
+            db.execute(text("""
+                UPDATE t_forum_post
+                SET like_count = like_count + 1,
+                    update_time = :now
+                WHERE post_id = :post_id
+            """), {
+                "post_id": post_id,
+                "now": now
+            })
+
+            action = "liked"
+
+        db.commit()
+
+        current_likes = db.execute(text("""
+            SELECT like_count FROM t_forum_post
+            WHERE post_id = :post_id
+        """), {"post_id": post_id}).scalar() or 0
+
+        return {
+            "status": "ok",
+            "action": action,
+            "likes": current_likes
+        }
+
+    except Exception as e:
+
+        db.rollback()
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 
-def like_reply(db: Session, reply_id: int, user_id: int) -> Dict:
-    """
-    点赞/取消点赞 回复
-    返回示例同上
-    """
-    reply = db.query(Reply).filter(Reply.id == reply_id).first()
-    if not reply:
+# ==============================
+# 点赞回复
+# ==============================
+"""
+    返回值说明：
+    - 成功：
+        status: ok
+        action: liked / unliked
+        likes: 当前回复最新点赞数
+    - 失败：
+        status: error
+        message: 错误原因
+"""
+
+@router.post("/replies/{reply_id}/like")
+def like_reply(reply_id: int, data: LikeAction, db: Session = Depends(get_db)):
+
+    user_id = data.user_id
+    now = datetime.now()
+
+    reply_exists = db.execute(text("""
+        SELECT 1 FROM t_forum_reply
+        WHERE reply_id = :reply_id AND is_delete = 0
+        LIMIT 1
+    """), {"reply_id": reply_id}).fetchone()
+
+    if not reply_exists:
         return {"status": "error", "message": "Reply not found"}
 
-    like_record = db.query(ReplyLike).filter(
-        ReplyLike.reply_id == reply_id,
-        ReplyLike.user_id == user_id
-    ).first()
+    like_record = db.execute(text("""
+        SELECT like_id FROM t_forum_reply_like
+        WHERE reply_id = :reply_id AND user_id = :user_id
+        LIMIT 1
+    """), {
+        "reply_id": reply_id,
+        "user_id": user_id
+    }).fetchone()
 
-    if like_record:
-        db.delete(like_record)
-        reply.likes_count = max(0, reply.likes_count - 1)
-        action = "unliked"
-    else:
-        db.add(ReplyLike(reply_id=reply_id, user_id=user_id))
-        reply.likes_count += 1
-        action = "liked"
+    try:
 
-    db.commit()
-    return {"status": "ok", "action": action, "likes": reply.likes_count}
+        if like_record:
+
+            db.execute(text("""
+                DELETE FROM t_forum_reply_like
+                WHERE reply_id = :reply_id AND user_id = :user_id
+            """), {
+                "reply_id": reply_id,
+                "user_id": user_id
+            })
+
+            db.execute(text("""
+                UPDATE t_forum_reply
+                SET like_count = GREATEST(like_count - 1, 0)
+                WHERE reply_id = :reply_id
+            """), {"reply_id": reply_id})
+
+            action = "unliked"
+
+        else:
+
+            db.execute(text("""
+                INSERT INTO t_forum_reply_like (reply_id, user_id, create_time)
+                VALUES (:reply_id, :user_id, :now)
+            """), {
+                "reply_id": reply_id,
+                "user_id": user_id,
+                "now": now
+            })
+
+            db.execute(text("""
+                UPDATE t_forum_reply
+                SET like_count = like_count + 1
+                WHERE reply_id = :reply_id
+            """), {"reply_id": reply_id})
+
+            action = "liked"
+
+        db.commit()
+
+        current_likes = db.execute(text("""
+            SELECT like_count FROM t_forum_reply
+            WHERE reply_id = :reply_id
+        """), {"reply_id": reply_id}).scalar() or 0
+
+        return {
+            "status": "ok",
+            "action": action,
+            "likes": current_likes
+        }
+
+    except Exception as e:
+
+        db.rollback()
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 
-def search_posts(db: Session, keyword: str, page: int = 1, page_size: int = 20) -> Dict:
-    """
-    搜索帖子（标题包含关键词）
-    返回格式：
-    {
-        "total": 25,
-        "posts": [
-            {"id":3, "title":"如何提高雅思听力", "author":"Alice", "time":"2026-03-10", "reply_count":4, "likes":2},
-            ...
-        ]
-    }
-    """
-    if not keyword or not keyword.strip():
-        return {"total": 0, "posts": []}
+# ==============================
+# 搜索帖子
+# ==============================
+"""
+    返回值说明：
+    - total: 符合关键词的帖子总数
+    - posts: 搜索结果列表（结构同帖子列表）
+"""
 
-    if page < 1:
-        page = 1
+@router.get("/posts/search")
+def search_posts(keyword: str, page: int = 1, page_size: int = 20, db: Session = Depends(get_db)):
+
+    keyword = f"%{keyword.strip()}%"
+
     offset = (page - 1) * page_size
 
-    query = db.query(Post).filter(Post.title.ilike(f"%{keyword.strip()}%"))
+    total = db.execute(text("""
+        SELECT COUNT(*)
+        FROM t_forum_post
+        WHERE is_delete = 0 AND title LIKE :keyword
+    """), {"keyword": keyword}).scalar() or 0
 
-    total = query.count()
+    rows = db.execute(text("""
+        SELECT p.post_id, p.title, p.create_time, p.reply_count, p.like_count, u.username AS author
+        FROM t_forum_post p
+        INNER JOIN t_user u ON p.user_id = u.user_id
+        WHERE p.is_delete = 0 AND p.title LIKE :keyword
+        ORDER BY p.create_time DESC
+        LIMIT :offset, :page_size
+    """), {
+        "keyword": keyword,
+        "offset": offset,
+        "page_size": page_size
+    }).fetchall()
 
-    posts = (
-        query.order_by(desc(Post.created_at))
-        .offset(offset)
-        .limit(page_size)
-        .all()
-    )
+    posts = []
 
-    result_posts = []
-    for p in posts:
-        result_posts.append({
-            "id": p.id,
-            "title": p.title,
-            "author": p.username,
-            "time": p.created_at.strftime("%Y-%m-%d"),
-            "reply_count": p.reply_count,
-            "likes": p.likes_count
+    for row in rows:
+        posts.append({
+            "id": row.post_id,
+            "title": row.title,
+            "author": row.author,
+            "time": row.create_time.strftime("%Y-%m-%d"),
+            "reply_count": row.reply_count,
+            "likes": row.like_count
         })
 
     return {
         "total": total,
-        "posts": result_posts
+        "posts": posts
     }
