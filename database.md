@@ -18,3 +18,5 @@
 2026/03/16 | Database structure verification and optimization | Completed | Verified unique constraints, foreign keys, and field lengths to ensure data integrity
 
 2026/03/17 | finish all data input
+
+2026/03/18 | modify data and test the server
