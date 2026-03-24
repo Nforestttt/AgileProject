@@ -20,3 +20,17 @@
 2026/03/17 | finish all data input
 
 2026/03/18 | modify data and test the server
+
+2026/03/20	Insert English listening materials in batches. Sort and import listening materials corresponding to Test1~Test4; verify data integrity and association relations
+
+2026/03/21	Organize new Cambridge materials data. Standardize audio, images, answers and paths; complete null fields for Test1~Test4
+
+2026/03/23	Insert new Cambridge materials data. Execute batch SQL import; verify resource validity and data constraints
+
+2026/03/24	Full database data verification. Check test data, words, resources and constraints; fix abnormal data
+
+2026/03/25	Backup local database and resources. Export full SQL dump and package static resources (audio/images)
+
+2026/03/26	Upload static resources to server. Upload audio and image files to server port 7777 directory; test resource access
+
+2026/03/27	Import database to remote server. Execute SQL script on server; configure foreign keys and cascade rules
